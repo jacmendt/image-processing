@@ -1,0 +1,6 @@
+# eclipse project folder
+.project
+.pydevproject
+
+# test data
+/test
