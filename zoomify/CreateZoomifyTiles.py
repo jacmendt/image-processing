@@ -26,7 +26,7 @@ Created on Feb 24, 2014
 @author: jacmendt
 @dependencies: imagemagick, gdal
 '''
-import subprocess, math, tempfile, shutil, sys, os, copy, logging, argparse, gdal
+import subprocess, math, tempfile, shutil, sys, os, copy, logging, argparse, gdal, logging
 
 # set path of the project directory for finding the correct modules
 BASE_PATH = os.path.dirname(os.path.realpath(__file__))
@@ -42,7 +42,7 @@ def getImageSize(imageFile):
     """
     datafile = gdal.Open(imageFile)
     if datafile:
-        return {'x':datafile.RasterXSize, 'y':datafile.RasterYSize}
+        return {'x':float(datafile.RasterXSize), 'y':float(datafile.RasterYSize)}
     return None
      
 def calculateTierSize(imageWidth, imageHeight, tileSize=256):
@@ -112,18 +112,20 @@ def sortTileToTileGroups(tierSizeInTiles, tileCountUpToTier, tileDir, targetPath
 
     return {'commands':commands, 'tilegroups':tileGroupeDirs}
 
-def createTiles(imgPath, tierSizeInTiles, tileCountUpToTier, imgWidth, imgHeight, targetDir):
+def createTiles(imgPath, tierSizeInTiles, tileCountUpToTier, imgWidth, imgHeight, targetDir, logger):
     """ The function create via imagemagick a tile pyramid for the given image
-    Arguments:
-        imgPath {String}
-        tierSizeInTiles {List}
-        tileCountUpToTier {List}
-        imgWidth {Float}
-        imgHeight {Float}
-        targetDir {String}
-        logger {LOGGER}
-    Return: {Array} """
+    
+    @param String: imgPath 
+    @param List: tierSizeInTiles 
+    @param List: tileCountUpToTier
+    @param Float: imgWidth
+    @param Float: imgHeight
+    @param String: targetDir 
+    @param logging.Logger: logger        logger {LOGGER}
+    @return: String
+    """
     try:
+        logger.debug('Create temporary tiles directory ...')
         tmp_dir = tempfile.mkdtemp("", "tmp_", targetDir)  # create dir
         
         # sort tiles to group
@@ -132,18 +134,20 @@ def createTiles(imgPath, tierSizeInTiles, tileCountUpToTier, imgWidth, imgHeight
         zoomify_dir = os.path.join(targetDir, zoomify_dirName)
 
         if os.path.exists(zoomify_dir):
+            logger.debug('Remove old zoomify directory ...')
             shutil.rmtree(zoomify_dir) 
             
         # calculate different zoom levels for the img
         zoomLevels = []
         i = len(tierSizeInTiles)
         lastImgPath = imgPath
+        logger.debug('Create resize images ...')
         while i > 0:
             resizePath = os.path.join(tmp_dir, 'zoom-%s.jpg' % i)
             command = '/usr/bin/convert "%s" -strip -resize 50%% -quality 75%% "%s"' % (lastImgPath, resizePath)
             if i == len(tierSizeInTiles):
                 command = '/usr/bin/convert "%s" -strip -quality 75%% "%s"' % (lastImgPath, resizePath)
-            print(command)
+            logger.debug(command)
             subprocess.check_call(command, shell=True)
             zoomLevels.append(resizePath)
             lastImgPath = resizePath
@@ -151,36 +155,36 @@ def createTiles(imgPath, tierSizeInTiles, tileCountUpToTier, imgWidth, imgHeight
              
         # create the tiles
         zoomLevels.reverse()
-        i = len(zoomLevels) - 1   
+        i = len(zoomLevels) - 1
+        logger.debug('Create tiles ...')   
         while i >= 0:
-            print("Zoom %s - %s" % (i, zoomLevels[i]))
             zoom_path = os.path.join(tmp_dir, "%s" % i)
             command = '/usr/bin/convert "%s" -crop 256x256 -set filename:tile "%%[fx:page.x/256]-%%[fx:page.y/256]" +repage +adjoin "%s-%%[filename:tile].jpg"' % (zoomLevels[i], zoom_path)
-            print(command)
+            logger.debug(command)
             subprocess.check_call(command, shell=True) 
             i -= 1
 
-        os.makedirs(zoomify_dir)
-        print('Target directory: %s' % zoomify_dir)
-            
+        os.makedirs(zoomify_dir)            
         sortTiled = sortTileToTileGroups(tierSizeInTiles, tileCountUpToTier, tmp_dir, zoomify_dir)
         # create tilegroup directorys
+        logger.debug('Create target dir %s ...'%zoomify_dir)
         for tileGroup in sortTiled['tilegroups']:
             if not os.path.exists(tileGroup):
                 os.makedirs(tileGroup)
                     
         # copy tiles in correct tilegroup directory
+        logger.debug('Copy tiles to target dir ...')
         for command in sortTiled['commands']:
             subprocess.check_call(command, shell=True)
         
         # write properties file 
+        logger.debug('Create zoomify properties files ...')
         xml_string = "<IMAGE_PROPERTIES WIDTH=\"%s\" HEIGHT=\"%s\" NUMTILES=\"%s\" NUMIMAGES=\"1\" VERSION=\"1.8\" TILESIZE=\"%s\" />" % (
                 int(imgWidth), int(imgHeight), len(sortTiled['commands']), 256)
-        print('Zoomify Properties: %s' % xml_string)
         imagePropertiesFile = open(os.path.join(zoomify_dir, 'ImageProperties.xml'), 'w')
         imagePropertiesFile.write(xml_string)
         imagePropertiesFile.close()
-        return zoomify_dir       
+        return imagePropertiesFile       
         
     except:
         print >> sys.stderr, "Unexpected error:", sys.exc_info()[0]
@@ -188,19 +192,32 @@ def createTiles(imgPath, tierSizeInTiles, tileCountUpToTier, imgWidth, imgHeight
     finally:
         try:
             # delete tmp_dir
-            shutil.rmtree(tmp_dir) 
+            shutil.rmtree(tmp_dir)
         except OSError, e:
             # code 2 - no such file or directory
             if e.errno != 2:
                 raise
-
-def processZoomifyTiles(inputFile, outputFile):
-    print 'Start processing zoomify tiles for image %s' % inputFile
+            
+def processZoomifyTiles(inputFile, outputDir, logger = None):
+    """ Parent method for processing the zoomify tiles 
+    
+    @param String: inputFile
+    @param String: outputDir
+    @param logging.Logger: logger (=None)
+    @return String Path to image properties files
+    """
+    if not logger:
+        logging.basicConfig()
+        logger = logging.getLogger('CreateZoomifyTiles')
+        logger.setLevel(logging.DEBUG)
+        
+    logger.debug('Start processing zoomify tiles for image %s' % inputFile)
     size = getImageSize(inputFile)
     tierSizeInTiles = calculateTierSize(size['x'], size['y'])
     tileCountUpToTier = calculateTileCountUpToTier(tierSizeInTiles)
-    createTiles(inputFile, tierSizeInTiles, tileCountUpToTier, size['x'], size['y'], outputFile)
-    print 'Finished calculating zoomify tiles for image %s' % inputFile 
+    targetDir = createTiles(inputFile, tierSizeInTiles, tileCountUpToTier, size['x'], size['y'], outputDir, logger)
+    logger.debug('Finished calculating zoomify tiles for image %s' % inputFile) 
+    return targetDir
     
 if __name__ == '__main__':
     # example command: ../python_env/bin/python CreateZoomifyTiles.py --input_file /home/mendt/mtb_paths_exist.md --tif_dir /srv/vk/data_archiv/0010000
@@ -209,13 +226,10 @@ if __name__ == '__main__':
     parser.add_argument('inputFile', metavar='INPUT_FILE', type=str, help='Path variable to image file what should be computed.')
     parser.add_argument('outputDir', metavar='OUTPUT_DIR', type=str, default='/tmp', help='Directory where to safe new zoomify tiles')
     args = parser.parse_args()
-  
+   
     inputFile = args.inputFile if os.path.exists(args.inputFile) else None
-    outputFile = args.outputDir if os.path.exists(args.outputDir) else None
-    
-    if inputFile is None or outputFile is None:
+    outputDir = args.outputDir if os.path.exists(args.outputDir) else None
+    if inputFile is None or outputDir is None:
         raise Exception('Image or directory not found. Please check your script parameter.')
     
-    processZoomifyTiles(inputFile, outputFile)
-    
-
+    processZoomifyTiles(inputFile, outputDir)
